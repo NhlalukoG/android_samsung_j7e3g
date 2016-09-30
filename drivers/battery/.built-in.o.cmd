@@ -1,0 +1,1 @@
+cmd_drivers/battery/built-in.o :=   /home/android/tools/toolchains/x64/uber/4.9/bin/aarch64-linux-android-ld -EL    -r -o drivers/battery/built-in.o drivers/battery/sec_battery.o drivers/battery/sec_adc.o drivers/battery/sm5703_fuelgauge.o drivers/battery/sm5703_charger.o 
