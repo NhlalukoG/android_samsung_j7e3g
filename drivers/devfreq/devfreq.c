@@ -27,6 +27,14 @@
 #include <linux/hrtimer.h>
 #include "governor.h"
 
+#ifdef CONFIG_SOC_EXYNOS7420
+#define DF_MAX_VOLT		900000
+#define DF_MIN_VOLT		500000
+#define DF_VOLT_STEP		6250
+#else
+#error "Please define core voltage ranges for current SoC."
+#endif
+
 static struct class *devfreq_class;
 
 /*
