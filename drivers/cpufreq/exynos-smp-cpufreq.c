@@ -128,6 +128,19 @@ static unsigned int exynos_bus_table[] = {
 	0,	/* 300MHz */
 };
 
+#ifdef CONFIG_SOC_EXYNOS7580
+#define CL0_MAX_VOLT		1175000
+#define CL1_MAX_VOLT		1125000
+#define CL0_MIN_VOLT		500000
+#define CL1_MIN_VOLT		500000
+#define CL_MAX_VOLT(cl)		(cl == CL_ZERO ? CL0_MAX_VOLT : CL1_MAX_VOLT)
+#define CL_MIN_VOLT(cl)		(cl == CL_ZERO ? CL0_MIN_VOLT : CL1_MIN_VOLT)
+#define CL_VOLT_STEP		6250
+#else
+#error "Please define core voltage ranges for current SoC."
+#endif
+
+
 static unsigned int voltage_tolerance;	/* in percentage */
 static DEFINE_MUTEX(exynos_cpu_lock);
 static bool is_suspended;
@@ -201,28 +214,6 @@ static int exynos_cpufreq_verify_policy(struct cpufreq_policy *policy)
 	u32 cur_cluster = cpu_to_cluster(policy->cpu);
 
 	return cpufreq_frequency_table_verify(policy, freq_table[cur_cluster]);
-}
-
-static void exynos_cpufreq_boost_frequency(int cpu, unsigned int timeout_ms)
-{
-	unsigned int booting_freq;
-	cluster_type target_cluster;
-
-#ifndef CONFIG_EXYNOS7580_QUAD
-	target_cluster = (cpu < 4) ? (CL_ZERO) : (CL_ONE);
-#else
-	target_cluster = (CL_ZERO);
-#endif
-
-	if (!support_full_frequency())
-		booting_freq = boost_freq;
-	else
-		booting_freq = boost_freq + 200000;
-
-	if (timeout_ms)
-		pm_qos_update_request_timeout(&boost_qos_min[target_cluster], booting_freq, timeout_ms * 1000);
-	else
-		pm_qos_update_request(&boost_qos_min[target_cluster], booting_freq);
 }
 
 static unsigned int exynos_get_safe_armvolt(struct cpufreq_policy *policy)
@@ -972,6 +963,7 @@ static void exynos_qos_nop(void *info)
 {
 }
 
+/*
 static ssize_t show_cpufreq_table(struct kobject *kobj, struct attribute *attr,
 		char *buf)
 {
@@ -988,7 +980,45 @@ static ssize_t show_cpufreq_table(struct kobject *kobj, struct attribute *attr,
 
 	return count;
 }
+*/
+/************************** sysfs interface ************************/
+#ifdef CONFIG_PM
+static ssize_t show_cpufreq_table(struct kobject *kobj,
+				struct attribute *attr, char *buf)
+{
+	int i;
+	ssize_t count = 0;
+	size_t tbl_sz = 0, pr_len;
+	/*struct cpufreq_frequency_table *freq_table_cluster0 = exynos_info[CL_ZERO]->freq_table;*/
+	struct cpufreq_frequency_table *table = freq_table[CL_ZERO];
 
+	for (i = 0; table[i].frequency != CPUFREQ_TABLE_END; i++)
+		tbl_sz++;
+	for (i = 0; table[i].frequency != CPUFREQ_TABLE_END; i++)
+		tbl_sz++;
+
+	if (tbl_sz == 0)
+		return -EINVAL;
+
+	pr_len = (size_t)((PAGE_SIZE - 2) / tbl_sz);
+
+	for (i = 0; table[i].frequency != CPUFREQ_TABLE_END; i++) {
+		if (table[i].frequency != CPUFREQ_ENTRY_INVALID)
+			count += snprintf(&buf[count], pr_len, "%d ",
+						table[i].frequency);
+	}
+
+	for (i = 0; table[i].frequency != CPUFREQ_TABLE_END; i++) {
+		if (table[i].frequency != CPUFREQ_ENTRY_INVALID)
+			count += snprintf(&buf[count], pr_len, "%d ",
+					table[i].frequency / 2);
+	}
+
+	count += snprintf(&buf[count - 1], 2, "\n");
+
+	return count - 1;
+}
+#endif
 static ssize_t show_cpufreq_min_limit(struct kobject *kobj, struct attribute *attr,
 			     char *buf)
 {
@@ -1080,26 +1110,118 @@ static ssize_t store_cpufreq_self_discharging(struct kobject *kobj, struct attri
 	int input;
 	int i;
 
-	if (!sscanf(buf, "%d", &input))
+static size_t get_freq_table_size(struct cpufreq_frequency_table *freq_table)
+ {
+	size_t tbl_sz = 0;
+	int i;
+ 
+	for (i = 0; freq_table[i].frequency != CPUFREQ_TABLE_END; i++)
+		tbl_sz++;
+
+	return tbl_sz;
+}
+
+static ssize_t show_volt_table(struct kobject *kobj,
+				struct attribute *attr, char *buf, int cluster)
+{
+
+	int i, count = 0;
+	size_t tbl_sz = 0, pr_len;
+	struct cpufreq_frequency_table *freq_table = exynos_info[cluster]->freq_table;
+
+	for (i = 0; freq_table[i].frequency != CPUFREQ_TABLE_END; i++)
+		tbl_sz++;
+
+	if (tbl_sz == 0)
 		return -EINVAL;
+	pr_len = (size_t)((PAGE_SIZE - 2) / tbl_sz);
 
-	if (input > 0) {
-		self_discharging = input;
-		cpu_idle_poll_ctrl(true);
-	}
-	else {
-		self_discharging = 0;
-		cpu_idle_poll_ctrl(false);
-	}
-
-	/* Isla Quad(A53 quad) need cpufreq min limit */
-	for (i = 0; i < CL_END; i++) {
-		pm_qos_update_request(&cluster_qos_min[i], self_discharging);
+	for (i = 0; freq_table[i].frequency != CPUFREQ_TABLE_END; i++) {
+		if (freq_table[i].frequency != CPUFREQ_ENTRY_INVALID)
+			count += snprintf(&buf[count], pr_len, "%d %d\n",
+					freq_table[i].frequency,
+					exynos_info[cluster]->volt_table[i]);
 	}
 
 	return count;
 }
+
+static ssize_t store_volt_table(struct kobject *kobj, struct attribute *attr,
+					const char *buf, size_t count, int cluster)
+{
+	int i, tokens, rest, target, invalid_offset;
+	struct cpufreq_frequency_table *freq_table = exynos_info[cluster]->freq_table;
+	size_t tbl_sz = get_freq_table_size(freq_table);
+	int t[tbl_sz];
+
+	invalid_offset = 0;
+
+	if ((tokens = read_into((int*)&t, tbl_sz, buf, count)) < 0)
+		return -EINVAL;
+
+	target = -1;
+	if (tokens == 2) {
+		for (i = 0; (freq_table[i].frequency != CPUFREQ_TABLE_END); i++) {
+			unsigned int freq = freq_table[i].frequency;
+			if (freq == CPUFREQ_ENTRY_INVALID)
+				continue;
+
+			if (t[0] == freq) {
+				target = i;
+				break;
+			}
+		}
+	}
+
+	mutex_lock(&cpufreq_lock);
+
+	if (tokens == 2 && target > 0) {
+		if ((rest = t[1] % CL_VOLT_STEP) != 0)
+			t[1] += CL_VOLT_STEP - rest;
+		
+		sanitize_min_max(t[1], CL_MIN_VOLT(cluster), CL_MAX_VOLT(cluster));
+		exynos_info[cluster]->volt_table[target] = t[1];
+ 	} else {
+
+		for (i = 0; i < tokens; i++) {
+			while (freq_table[i + invalid_offset].frequency == CPUFREQ_ENTRY_INVALID)
+				++invalid_offset;
+
+			if ((rest = t[i] % CL_VOLT_STEP) != 0)
+				t[i] += CL_VOLT_STEP - rest;
+			
+			sanitize_min_max(t[i], CL_MIN_VOLT(cluster), CL_MAX_VOLT(cluster));
+			exynos_info[cluster]->volt_table[i + invalid_offset] = t[i];
+		}
+ 	}
+ 
+	mutex_unlock(&cpufreq_lock);
+
+ 	return count;
+}
 #endif
+
+static void exynos_cpufreq_boost_frequency(int cpu, unsigned int timeout_ms)
+{
+	unsigned int booting_freq;
+	cluster_type target_cluster;
+
+#ifndef CONFIG_EXYNOS7580_QUAD
+	target_cluster = (cpu < 4) ? (CL_ZERO) : (CL_ONE);
+#else
+	target_cluster = (CL_ZERO);
+#endif
+
+	if (!support_full_frequency())
+		booting_freq = boost_freq;
+	else
+		booting_freq = boost_freq + 200000;
+
+	if (timeout_ms)
+		pm_qos_update_request_timeout(&boost_qos_min[target_cluster], booting_freq, timeout_ms * 1000);
+	else
+		pm_qos_update_request(&boost_qos_min[target_cluster], booting_freq);
+}
 
 define_one_global_ro(cpufreq_table);
 define_one_global_rw(cpufreq_min_limit);
